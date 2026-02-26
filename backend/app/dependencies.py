@@ -84,23 +84,52 @@ def init_database() -> None:
 
 
 def _seed_database() -> None:
-    """Run generate_dataset.py programmatically to populate an empty DB."""
-    import subprocess
+    """Populate an empty DB by calling generate_dataset functions in-process.
+
+    We must NOT spawn a subprocess here because _conn already holds the DuckDB
+    file lock and a second process cannot acquire it simultaneously.
+    """
+    import random
     import sys
     from pathlib import Path
 
-    script = Path(__file__).parent.parent / "data" / "generate_dataset.py"
-    db_path = Path(settings.database_path)
+    # Make the data/ directory importable so we can reuse the builder functions
+    data_dir = str(Path(__file__).parent.parent / "data")
+    if data_dir not in sys.path:
+        sys.path.insert(0, data_dir)
 
-    result = subprocess.run(
-        [sys.executable, str(script), "--db-path", str(db_path)],
-        capture_output=True,
-        text=True,
+    from generate_dataset import (  # type: ignore[import]
+        build_dim_date,
+        build_dim_geography,
+        build_dim_product,
+        build_dim_customer,
+        build_fact_sales,
+        insert_rows,
     )
-    if result.returncode != 0:
-        logger.error("Dataset generation failed:\n%s", result.stderr)
-        raise RuntimeError(f"Dataset generation failed: {result.stderr}")
-    logger.info("Dataset generated:\n%s", result.stdout)
+    from datetime import date
+
+    rng = random.Random(42)
+    start_date = date(2022, 1, 1)
+    end_date = date(2024, 12, 31)
+
+    logger.info("Building dimension tables...")
+    date_rows = build_dim_date(start_date, end_date)
+    geo_rows = build_dim_geography()
+    product_rows = build_dim_product()
+    customer_rows = build_dim_customer(200)
+
+    logger.info("Building fact_sales (10,000 rows)...")
+    fact_rows = build_fact_sales(10_000, date_rows, geo_rows, product_rows, customer_rows, rng)
+
+    logger.info("Inserting into DuckDB...")
+    _conn.begin()
+    insert_rows(_conn, "dim_date", date_rows)
+    insert_rows(_conn, "dim_geography", geo_rows)
+    insert_rows(_conn, "dim_product", product_rows)
+    insert_rows(_conn, "dim_customer", customer_rows)
+    insert_rows(_conn, "fact_sales", fact_rows)
+    _conn.commit()
+    logger.info("Dataset seeded successfully.")
 
 
 def close_database() -> None:
