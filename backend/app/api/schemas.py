@@ -33,6 +33,20 @@ class VisualizationHint(BaseModel):
     color_by: Optional[str] = Field(None, description="Suggested color grouping column")
 
 
+class ExecutiveSummary(BaseModel):
+    text: str = Field(default="")
+    highlights: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class ReportItem(BaseModel):
+    title: str = Field(default="")
+    columns: list[str] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
+    row_count: int = Field(default=0)
+    operation: str = Field(default="")
+
+
 class ChatResponse(BaseModel):
     session_id: str = Field(..., description="Session ID (new or existing)")
     intent: str = Field(..., description="Detected OLAP intent")
@@ -44,6 +58,9 @@ class ChatResponse(BaseModel):
     follow_up_suggestions: list[str] = Field(default_factory=list, description="Suggested follow-up questions")
     error: Optional[str] = Field(None, description="Error message if request failed")
     latency_ms: int = Field(default=0, description="Total processing time in milliseconds")
+    summary: Optional[ExecutiveSummary] = Field(None, description="Structured executive summary with highlights and recommendations")
+    reports: list[ReportItem] = Field(default_factory=list, description="Structured report items")
+    llm_used: bool = Field(default=False, description="Whether LLM was used for classification")
 
 
 # ---------------------------------------------------------------------------

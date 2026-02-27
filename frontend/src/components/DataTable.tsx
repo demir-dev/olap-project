@@ -1,10 +1,23 @@
 import { useState } from 'react'
+import type { DataPayload } from '../types'
 
 interface DataTableProps {
-  columns: string[]
-  rows: (string | number | null)[][]
-  rowCount: number
+  // Accept either a DataPayload object directly (for OLAPControls inline results)
+  // or individual columns/rows/rowCount (original interface)
+  data?: DataPayload
+  columns?: string[]
+  rows?: (string | number | null)[][]
+  rowCount?: number
   maxHeight?: string
+  maxRows?: number
+}
+
+// Columns whose values should show green (positive) / red (negative)
+const DELTA_COLS = ['growth', 'pct', 'delta', 'change', 'margin', 'share']
+
+function isDeltaColumn(colName: string): boolean {
+  const c = colName.toLowerCase()
+  return DELTA_COLS.some(kw => c.includes(kw))
 }
 
 function formatCell(value: string | number | null, colName: string): string {
@@ -20,8 +33,8 @@ function formatCell(value: string | number | null, colName: string): string {
       if (Math.abs(num) >= 1_000) return `$${(num / 1_000).toFixed(1)}K`
       return `$${num.toFixed(2)}`
     }
-    // Percentage columns
-    if (col.includes('pct') || col.includes('percent') || col.includes('margin') || col.includes('growth') || col.includes('share')) {
+    // Percentage / delta columns
+    if (col.includes('pct') || col.includes('percent') || col.includes('margin') || col.includes('growth') || col.includes('share') || col.includes('delta_pct')) {
       return `${num.toFixed(1)}%`
     }
     // Z-score
@@ -36,23 +49,57 @@ function formatCell(value: string | number | null, colName: string): string {
   return String(value)
 }
 
-function getColumnAlignment(colName: string, rows: (string | number | null)[][]): 'left' | 'right' {
+function getCellClass(
+  value: string | number | null,
+  colName: string,
+  baseClass: string,
+  isAnomaly: boolean,
+): string {
+  const classes: string[] = [baseClass]
+
+  if (isAnomaly) {
+    classes.push('text-red-600 font-semibold')
+    return classes.join(' ')
+  }
+
+  if (isDeltaColumn(colName)) {
+    const num = typeof value === 'number' ? value : parseFloat(String(value ?? ''))
+    if (!isNaN(num)) {
+      if (num > 0) classes.push('text-green-600 font-semibold')
+      else if (num < 0) classes.push('text-red-500 font-semibold')
+    } else if (typeof value === 'string') {
+      if (value.startsWith('+')) classes.push('text-green-600 font-semibold')
+      else if (value.startsWith('-')) classes.push('text-red-500 font-semibold')
+    }
+  }
+
+  return classes.join(' ')
+}
+
+function getColumnAlignment(colName: string): 'left' | 'right' {
   const col = colName.toLowerCase()
   if (
     col.includes('revenue') || col.includes('profit') || col.includes('cost') ||
     col.includes('pct') || col.includes('percent') || col.includes('margin') ||
     col.includes('growth') || col.includes('rank') || col.includes('count') ||
     col.includes('quantity') || col.includes('orders') || col.includes('value') ||
-    col.includes('price') || col.includes('share') || col.includes('score')
+    col.includes('price') || col.includes('share') || col.includes('score') ||
+    col.includes('delta')
   ) {
     return 'right'
   }
   return 'left'
 }
 
-export function DataTable({ columns, rows, rowCount, maxHeight = '400px' }: DataTableProps) {
+export function DataTable({ data, columns: colsProp, rows: rowsProp, rowCount: rowCountProp, maxHeight = '400px', maxRows }: DataTableProps) {
   const [sortCol, setSortCol] = useState<number | null>(null)
   const [sortAsc, setSortAsc] = useState(true)
+
+  // Resolve columns/rows/rowCount from either source
+  const columns = data?.columns ?? colsProp ?? []
+  const allRows = data?.rows ?? rowsProp ?? []
+  const rowCount = data?.row_count ?? rowCountProp ?? allRows.length
+  const rows = maxRows ? allRows.slice(0, maxRows) : allRows
 
   if (!columns.length) return null
 
@@ -61,7 +108,7 @@ export function DataTable({ columns, rows, rowCount, maxHeight = '400px' }: Data
       setSortAsc(!sortAsc)
     } else {
       setSortCol(idx)
-      setSortAsc(false) // default: descending for numeric
+      setSortAsc(false)
     }
   }
 
@@ -90,7 +137,7 @@ export function DataTable({ columns, rows, rowCount, maxHeight = '400px' }: Data
           <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
             <tr>
               {columns.map((col, idx) => {
-                const align = getColumnAlignment(col, rows)
+                const align = getColumnAlignment(col)
                 return (
                   <th
                     key={idx}
@@ -120,24 +167,13 @@ export function DataTable({ columns, rows, rowCount, maxHeight = '400px' }: Data
             {displayRows.map((row, rIdx) => (
               <tr key={rIdx} className="hover:bg-blue-50/40 transition-colors">
                 {row.map((cell, cIdx) => {
-                  const align = getColumnAlignment(columns[cIdx], rows)
+                  const align = getColumnAlignment(columns[cIdx])
                   const formatted = formatCell(cell, columns[cIdx])
                   const isAnomaly = columns[cIdx]?.toLowerCase() === 'status' && String(cell) === 'ANOMALY'
-                  const isNegative = typeof cell === 'number' && cell < 0 && (
-                    columns[cIdx]?.toLowerCase().includes('growth') ||
-                    columns[cIdx]?.toLowerCase().includes('pct')
-                  )
+                  const baseClass = `px-4 py-2.5 whitespace-nowrap ${align === 'right' ? 'text-right font-mono' : 'text-left text-gray-800'}`
+                  const cellClass = getCellClass(cell, columns[cIdx], baseClass, isAnomaly)
                   return (
-                    <td
-                      key={cIdx}
-                      className={`
-                        px-4 py-2.5 whitespace-nowrap
-                        ${align === 'right' ? 'text-right font-mono text-gray-700' : 'text-left text-gray-800'}
-                        ${isAnomaly ? 'text-red-600 font-semibold' : ''}
-                        ${isNegative ? 'text-red-500' : ''}
-                        ${!isAnomaly && !isNegative && align === 'right' ? 'text-gray-700' : ''}
-                      `}
-                    >
+                    <td key={cIdx} className={cellClass}>
                       {formatted}
                     </td>
                   )

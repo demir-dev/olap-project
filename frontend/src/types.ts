@@ -13,6 +13,29 @@ export interface VisualizationHint {
   color_by: string | null
 }
 
+export interface ExecutiveSummary {
+  text: string
+  highlights: string[]
+  recommendations: string[]
+}
+
+export interface ReportItem {
+  title: string
+  columns: string[]
+  rows: (string | number | null)[][]
+  row_count: number
+  operation: string
+}
+
+export interface DashboardKPIs {
+  total_revenue: number
+  total_profit: number
+  avg_margin_pct: number
+  total_orders: number
+  total_units: number
+  countries: number
+}
+
 export interface ChatResponse {
   session_id: string
   intent: string
@@ -24,6 +47,9 @@ export interface ChatResponse {
   follow_up_suggestions: string[]
   error: string | null
   latency_ms: number
+  summary?: ExecutiveSummary
+  reports?: ReportItem[]
+  llm_used?: boolean
 }
 
 export interface ChatRequest {

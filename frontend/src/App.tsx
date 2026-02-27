@@ -1,18 +1,22 @@
 import { useEffect, useState } from 'react'
 import { ChatInput } from './components/ChatInput'
 import { ConversationHistory } from './components/ConversationHistory'
+import { KPIBar } from './components/KPIBar'
+import { OLAPControls } from './components/OLAPControls'
 import { ResultsPanel } from './components/ResultsPanel'
 import { SampleQuestions } from './components/SampleQuestions'
 import { useChat } from './hooks/useChat'
 import { api } from './api/client'
 import type { HealthResponse } from './types'
 
+type ActiveTab = 'chat' | 'olap'
+
 export default function App() {
   const { messages, currentResult, isLoading, sendMessage, clearSession } = useChat()
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [activeTab, setActiveTab] = useState<ActiveTab>('chat')
 
-  // Check backend health on load
   useEffect(() => {
     api.health()
       .then(setHealth)
@@ -78,6 +82,9 @@ export default function App() {
         </div>
       </header>
 
+      {/* ── KPI Dashboard Bar (always visible) ── */}
+      <KPIBar />
+
       {/* ── Main layout ── */}
       <div className="flex flex-1 overflow-hidden">
 
@@ -89,44 +96,70 @@ export default function App() {
             ${sidebarOpen ? 'w-80 lg:w-96' : 'w-0 overflow-hidden'}
           `}
         >
-          {/* Panel header */}
           <div className="flex-shrink-0 px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-gray-700">Conversation</h2>
             {messages.length > 0 && (
-              <span className="text-xs text-gray-400">{Math.ceil(messages.length / 2)} turn{Math.ceil(messages.length / 2) !== 1 ? 's' : ''}</span>
+              <span className="text-xs text-gray-400">
+                {Math.ceil(messages.length / 2)} turn{Math.ceil(messages.length / 2) !== 1 ? 's' : ''}
+              </span>
             )}
           </div>
 
-          {/* Chat history */}
           <div className="flex-1 overflow-hidden">
-            <ConversationHistory
-              messages={messages}
-              onFollowUp={sendMessage}
-            />
+            <ConversationHistory messages={messages} onFollowUp={sendMessage} />
           </div>
         </div>
 
-        {/* ── Right panel: Results + Chat input ── */}
+        {/* ── Right panel: Tabbed content ── */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
 
-          {/* Sample questions bar */}
-          <div className="flex-shrink-0 px-4 py-2 bg-white border-b border-gray-100 flex items-center gap-3">
-            <span className="text-xs text-gray-400 font-medium hidden sm:block whitespace-nowrap">Try:</span>
-            <SampleQuestions onSelect={sendMessage} disabled={isLoading} />
+          {/* Tab bar */}
+          <div className="flex-shrink-0 bg-white border-b border-gray-100 flex items-center gap-0 px-4">
+            {(['chat', 'olap'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`
+                  px-4 py-3 text-sm font-medium border-b-2 transition-colors
+                  ${activeTab === tab
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+                `}
+              >
+                {tab === 'chat' ? 'Ask AI' : 'OLAP Controls'}
+              </button>
+            ))}
+            {/* Sample questions (only in chat tab) */}
+            {activeTab === 'chat' && (
+              <div className="ml-4 flex items-center gap-3 flex-1 overflow-hidden">
+                <span className="text-xs text-gray-400 font-medium hidden sm:block whitespace-nowrap">Try:</span>
+                <SampleQuestions onSelect={sendMessage} disabled={isLoading} />
+              </div>
+            )}
           </div>
 
-          {/* Results */}
-          <div className="flex-1 overflow-hidden bg-white mx-4 my-3 rounded-xl border border-gray-200 shadow-sm">
-            <ResultsPanel result={currentResult} isLoading={isLoading} />
-          </div>
+          {/* Tab content */}
+          {activeTab === 'chat' ? (
+            <>
+              {/* Results */}
+              <div className="flex-1 overflow-hidden bg-white mx-4 my-3 rounded-xl border border-gray-200 shadow-sm">
+                <ResultsPanel result={currentResult} isLoading={isLoading} />
+              </div>
 
-          {/* Chat input */}
-          <div className="flex-shrink-0 px-4 pb-4">
-            <ChatInput onSend={sendMessage} disabled={isLoading} />
-            <p className="text-xs text-gray-400 mt-1.5 text-center">
-              Supports: Slice · Dice · Drill-Down · Roll-Up · Compare · Pivot · Drill-Through
-            </p>
-          </div>
+              {/* Chat input */}
+              <div className="flex-shrink-0 px-4 pb-4">
+                <ChatInput onSend={sendMessage} disabled={isLoading} />
+                <p className="text-xs text-gray-400 mt-1.5 text-center">
+                  Supports: Slice · Dice · Drill-Down · Roll-Up · Compare · Pivot · Drill-Through
+                </p>
+              </div>
+            </>
+          ) : (
+            /* OLAP Controls tab */
+            <div className="flex-1 overflow-hidden bg-white mx-4 my-3 rounded-xl border border-gray-200 shadow-sm flex flex-col">
+              <OLAPControls />
+            </div>
+          )}
         </div>
       </div>
     </div>

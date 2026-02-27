@@ -77,6 +77,151 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
 }
 
 # ---------------------------------------------------------------------------
+# LLM Tool definitions (Anthropic tool-use format)
+# ---------------------------------------------------------------------------
+
+TOOL_DEFINITIONS = [
+    {
+        "name": "drill_down",
+        "description": "Break down data to a more granular level (e.g., year → quarter → month, region → country)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {"type": "string", "description": "Dimension to drill into"},
+                "filters": {"type": "object", "description": "Optional filters"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "roll_up",
+        "description": "Aggregate data to a higher level (e.g., month → quarter → year)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {"type": "string", "description": "Dimension to roll up to"},
+                "measure": {"type": "string", "description": "Measure to aggregate"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "slice",
+        "description": "Filter the data cube on one dimension value",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {"type": "string", "description": "Dimension to slice on"},
+                "value": {"type": "string", "description": "Value to filter to"},
+                "measure": {"type": "string", "description": "Measure to show"},
+            },
+            "required": ["dimension"],
+        },
+    },
+    {
+        "name": "dice",
+        "description": "Filter the data cube on multiple dimensions simultaneously",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filters": {"type": "object", "description": "Dict of dimension→value filters"},
+                "measures": {"type": "array", "items": {"type": "string"}, "description": "Measures to show"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "pivot",
+        "description": "Rotate the data cube to show dimensions as rows and columns",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rows": {"type": "string", "description": "Dimension to use as rows"},
+                "columns": {"type": "string", "description": "Dimension to use as columns"},
+                "measure": {"type": "string", "description": "Measure to aggregate in cells"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "yoy_growth",
+        "description": "Calculate year-over-year growth rates for a measure",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "measure": {"type": "string", "description": "Measure to compute growth for"},
+                "dimension": {"type": "string", "description": "Optional dimension to group by"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "mom_change",
+        "description": "Calculate month-over-month change for a measure",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "measure": {"type": "string", "description": "Measure to compute change for"},
+                "year": {"type": "integer", "description": "Year to analyse"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "profit_margins",
+        "description": "Analyse profit margins by dimension (category, region, segment)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {"type": "string", "description": "Dimension to group margins by"},
+                "year": {"type": "integer", "description": "Optional year filter"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "top_n",
+        "description": "Rank the top N members of a dimension by a measure",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "Number of top items to return"},
+                "dimension": {"type": "string", "description": "Dimension to rank"},
+                "measure": {"type": "string", "description": "Measure to rank by"},
+                "year": {"type": "integer", "description": "Optional year filter"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "compare_periods",
+        "description": "Compare two specific years side by side with deltas",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "year_a": {"type": "integer", "description": "First year to compare"},
+                "year_b": {"type": "integer", "description": "Second year to compare"},
+                "dimension": {"type": "string", "description": "Dimension to break down by"},
+                "measure": {"type": "string", "description": "Measure to compare"},
+            },
+            "required": ["year_a", "year_b"],
+        },
+    },
+    {
+        "name": "revenue_share",
+        "description": "Show market share / revenue distribution as percentages across a dimension",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {"type": "string", "description": "Dimension to compute share for"},
+                "year": {"type": "integer", "description": "Optional year filter"},
+            },
+            "required": [],
+        },
+    },
+]
+
+# ---------------------------------------------------------------------------
 # Schema summary for LLM prompts
 # ---------------------------------------------------------------------------
 
@@ -128,7 +273,7 @@ class Planner:
         intent, entities = self._classify(message, session)
         logger.info("[%s] intent=%s entities=%s", session.session_id[:8], intent, entities)
 
-        # 2. Build agent input
+        # 2. Build agent input - ensure message is in session context for agents
         agent_input = AgentInput(
             message=message,
             intent=intent,
@@ -137,6 +282,7 @@ class Planner:
                 **session.resolved_context,
                 "active_filters": session.resolved_context.get("active_filters", {}),
                 "history_summary": session.get_context_summary(3),
+                "message": message,  # Include message for entity extraction in agents
             },
             schema_summary=SCHEMA_SUMMARY,
             page=page,
@@ -155,13 +301,14 @@ class Planner:
             if refined.get("chart_type") != "table":
                 output.visualization_hint = {**refined, **output.visualization_hint}
 
-        # 5. Generate narrative via ReportGenerator
-        narrative = self._report.generate_narrative(
+        # 5. Generate structured summary via ReportGenerator (replaces plain narrative)
+        summary_dict = self._report.generate_structured_summary(
             user_question=message,
             intent=intent,
             data=output.data,
             context=session.resolved_context,
         )
+        narrative = summary_dict.get("text", "")
         output.narrative = narrative
 
         # 6. Generate follow-up suggestions
@@ -174,6 +321,15 @@ class Planner:
         output.follow_up_suggestions = follow_ups
 
         # 7. Update session context
+        # Track dimension level for drill-down/roll-up context
+        if intent in ("drill_down", "roll_up") and output.data and output.data.get("columns"):
+            # Try to identify the dimension level from the result columns
+            for col in output.data.get("columns", []):
+                if col in ["year", "quarter", "month", "month_name", "quarter_name", 
+                          "region", "country", "category", "subcategory", "product_name"]:
+                    entities["dimensions"] = [col]
+                    break
+        
         session.update_context(entities)
         turn = ConversationTurn(
             turn_id=len(session.turns) + 1,
@@ -188,6 +344,19 @@ class Planner:
 
         latency_ms = int((time.time() - t0) * 1000)
 
+        # Build reports list from agent output
+        reports = []
+        if output.data and output.data.get("columns"):
+            reports.append({
+                "title": f"{intent.replace('_', ' ').title()} Results",
+                "columns": output.data.get("columns", []),
+                "rows": output.data.get("rows", []),
+                "row_count": output.data.get("row_count", 0),
+                "operation": intent,
+            })
+
+        llm_used = bool(self._llm_client)
+
         return {
             "session_id":           session.session_id,
             "intent":               intent,
@@ -199,6 +368,9 @@ class Planner:
             "follow_up_suggestions": output.follow_up_suggestions,
             "error":                output.error,
             "latency_ms":           latency_ms,
+            "summary":              summary_dict,
+            "reports":              reports,
+            "llm_used":             llm_used,
         }
 
     # ------------------------------------------------------------------
@@ -350,55 +522,88 @@ class Planner:
     def _llm_classify(
         self, message: str, session: SessionContext
     ) -> tuple[str, dict[str, Any]]:
-        """Use Claude Haiku for intent classification + entity extraction."""
-        history_ctx = session.get_context_summary(3)
-        system = f"""You are an OLAP query classifier. Analyse the user's question and return JSON.
+        """Use Claude Haiku with tool-calling for intent classification + entity extraction."""
+        if not self._llm_client:
+            logger.debug("LLM client not available, using regex fallback")
+            return "dice", self._extract_entities_regex(message)
 
-Schema context:
+        history_ctx = session.get_context_summary(3)
+        system = f"""You are an OLAP query classifier. Use the appropriate tool to classify the user's business intelligence question.
+
+Schema:
 {SCHEMA_SUMMARY}
 
 Recent conversation:
 {history_ctx or "(none)"}
 
-Return ONLY valid JSON with this exact structure:
-{{
-  "intent": "<one of: slice|dice|drill_down|roll_up|compare|pivot|drill_through|kpi|dimensions|anomaly>",
-  "entities": {{
-    "regions": [],
-    "categories": [],
-    "years": [],
-    "quarters": [],
-    "months": [],
-    "measures": [],
-    "customer_segments": [],
-    "dimensions": [],
-    "top_n": null,
-    "kpi_type": null,
-    "filters": {{}}
-  }}
-}}"""
+Choose the tool that best matches the user's intent and extract relevant parameters."""
 
         try:
             response = self._llm_client.messages.create(
                 model=settings.llm_model,
-                max_tokens=400,
+                max_tokens=512,
                 temperature=0.0,
                 system=system,
+                tools=TOOL_DEFINITIONS,
+                tool_choice={"type": "auto"},
                 messages=[{"role": "user", "content": message}],
             )
-            raw = response.content[0].text.strip()
-            # Extract JSON from response
-            json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                intent = parsed.get("intent", "dice")
-                entities = parsed.get("entities", {})
-                return intent, entities
+            # Extract the first tool_use block
+            for block in response.content:
+                if block.type == "tool_use":
+                    intent, entities = self._map_tool_to_intent(block.name, block.input)
+                    logger.debug("LLM tool-use classified intent: %s entities: %s", intent, entities)
+                    return intent, entities
         except Exception as exc:
-            logger.warning("LLM classification failed: %s — falling back to regex", exc)
+            logger.warning("LLM tool-calling failed: %s — falling back to regex", exc)
 
         # Fallback
         return "dice", self._extract_entities_regex(message)
+
+    def _map_tool_to_intent(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        """Map LLM tool name + input to (intent, entities) that agents expect."""
+        entities = self._extract_entities_regex("")  # start with empty entities
+
+        # Merge common fields from tool_input
+        if tool_input.get("dimension"):
+            entities["dimensions"] = [tool_input["dimension"]]
+        if tool_input.get("measure"):
+            entities["measures"] = [tool_input["measure"]]
+        if tool_input.get("filters"):
+            entities["filters"] = tool_input["filters"]
+        if tool_input.get("year"):
+            entities["years"] = [int(tool_input["year"])]
+        if tool_input.get("year_a") and tool_input.get("year_b"):
+            entities["years"] = [int(tool_input["year_a"]), int(tool_input["year_b"])]
+        if tool_input.get("n"):
+            entities["top_n"] = int(tool_input["n"])
+        if tool_input.get("rows"):
+            entities.setdefault("dimensions", [tool_input["rows"]])
+        if tool_input.get("value"):
+            d = tool_input.get("dimension", "region")
+            entities.setdefault("filters", {})[d] = tool_input["value"]
+
+        # Map tool name → (intent, kpi_type)
+        mapping: dict[str, tuple[str, str | None]] = {
+            "drill_down":     ("drill_down", None),
+            "roll_up":        ("roll_up", None),
+            "slice":          ("slice", None),
+            "dice":           ("dice", None),
+            "pivot":          ("pivot", None),
+            "yoy_growth":     ("kpi", "yoy_growth"),
+            "mom_change":     ("kpi", "mom_growth"),
+            "profit_margins": ("kpi", "margin"),
+            "top_n":          ("kpi", "top_n"),
+            "compare_periods":("kpi", "compare_periods"),
+            "revenue_share":  ("kpi", "market_share"),
+        }
+        intent, kpi_type = mapping.get(tool_name, ("dice", None))
+        if kpi_type:
+            entities["kpi_type"] = kpi_type
+
+        return intent, entities
 
     # ------------------------------------------------------------------
     # Agent routing

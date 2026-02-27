@@ -1,11 +1,17 @@
 import { useState } from 'react'
-import type { ChatResponse } from '../types'
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts'
+import type { ChatResponse, DataPayload } from '../types'
 import { DataTable } from './DataTable'
 
 interface ResultsPanelProps {
   result: ChatResponse | null
   isLoading?: boolean
 }
+
+const CHART_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6']
 
 const INTENT_LABELS: Record<string, { label: string; color: string }> = {
   slice:         { label: 'Slice',         color: 'bg-purple-100 text-purple-700' },
@@ -19,6 +25,79 @@ const INTENT_LABELS: Record<string, { label: string; color: string }> = {
   dimensions:    { label: 'Dimensions',    color: 'bg-teal-100 text-teal-700' },
   anomaly:       { label: 'Anomaly',       color: 'bg-rose-100 text-rose-700' },
 }
+
+// ---------------------------------------------------------------------------
+// Chart panel
+// ---------------------------------------------------------------------------
+
+function dataToChartRows(data: DataPayload, xKey: string, yKey: string) {
+  const xIdx = data.columns.indexOf(xKey)
+  const yIdx = data.columns.indexOf(yKey)
+  if (xIdx < 0 || yIdx < 0) return []
+  return data.rows.map(row => ({
+    name: String(row[xIdx] ?? ''),
+    value: typeof row[yIdx] === 'number' ? row[yIdx] : parseFloat(String(row[yIdx] ?? 0)) || 0,
+  }))
+}
+
+function ChartPanel({ data, chartType, xAxis, yAxis }: {
+  data: DataPayload
+  chartType: string
+  xAxis: string | null
+  yAxis: string | null
+}) {
+  if (!xAxis || !yAxis) return null
+  if (chartType === 'table' || chartType === 'heatmap') return null
+
+  const chartData = dataToChartRows(data, xAxis, yAxis)
+  if (chartData.length === 0) return null
+
+  return (
+    <div className="px-4 pb-3 flex-shrink-0">
+      <div className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+        <p className="text-xs text-gray-400 mb-2 font-medium uppercase tracking-wide">
+          {chartType} chart · {xAxis} × {yAxis}
+        </p>
+        <ResponsiveContainer width="100%" height={220}>
+          {chartType === 'pie' ? (
+            <PieChart>
+              <Pie data={chartData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}>
+                {chartData.map((_, i) => (
+                  <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                ))}
+              </Pie>
+              <Tooltip formatter={(v: number) => v.toLocaleString()} />
+            </PieChart>
+          ) : chartType === 'line' ? (
+            <LineChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip formatter={(v: number) => v.toLocaleString()} />
+              <Line type="monotone" dataKey="value" stroke={CHART_COLORS[0]} strokeWidth={2} dot={{ r: 3 }} />
+            </LineChart>
+          ) : (
+            <BarChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip formatter={(v: number) => v.toLocaleString()} />
+              <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                {chartData.map((_, i) => (
+                  <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                ))}
+              </Bar>
+            </BarChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export function ResultsPanel({ result, isLoading }: ResultsPanelProps) {
   const [showSql, setShowSql] = useState(false)
@@ -47,7 +126,6 @@ export function ResultsPanel({ result, isLoading }: ResultsPanelProps) {
         <h3 className="font-semibold text-gray-600 mb-1">Results will appear here</h3>
         <p className="text-sm">Ask a question to run an OLAP analysis on the Global Retail Sales dataset.</p>
 
-        {/* Dataset overview cards */}
         <div className="grid grid-cols-2 gap-3 mt-6 w-full max-w-sm text-left">
           {[
             { label: 'Total Records', value: '10,000', icon: '📊' },
@@ -63,7 +141,6 @@ export function ResultsPanel({ result, isLoading }: ResultsPanelProps) {
           ))}
         </div>
 
-        {/* OLAP operations reference */}
         <div className="mt-6 w-full max-w-sm text-left">
           <p className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">Supported Operations</p>
           <div className="flex flex-wrap gap-1.5">
@@ -97,13 +174,16 @@ export function ResultsPanel({ result, isLoading }: ResultsPanelProps) {
   }
 
   const intentMeta = INTENT_LABELS[result.intent] || { label: result.intent, color: 'bg-gray-100 text-gray-600' }
+  const vh = result.visualization_hint
+  const hasHighlights = (result.summary?.highlights?.length ?? 0) > 0
+  const hasRecommendations = (result.summary?.recommendations?.length ?? 0) > 0
 
   return (
     <div className="flex flex-col h-full overflow-y-auto scrollbar-thin">
       {/* Header */}
       <div className="p-4 border-b border-gray-100 flex-shrink-0">
         <div className="flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${intentMeta.color}`}>
               {intentMeta.label}
             </span>
@@ -112,6 +192,16 @@ export function ResultsPanel({ result, isLoading }: ResultsPanelProps) {
                 {agent}
               </span>
             ))}
+            {/* LLM mode badge */}
+            {result.llm_used ? (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
+                AI mode · anthropic
+              </span>
+            ) : (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">
+                keyword mode
+              </span>
+            )}
           </div>
           <span className="text-xs text-gray-400">{result.latency_ms}ms</span>
         </div>
@@ -131,19 +221,53 @@ export function ResultsPanel({ result, isLoading }: ResultsPanelProps) {
         </div>
       )}
 
+      {/* Highlights */}
+      {hasHighlights && (
+        <div className="px-4 pb-2 flex-shrink-0">
+          <p className="text-xs text-gray-400 mb-1.5 font-medium uppercase tracking-wide">Key Highlights</p>
+          <ul className="space-y-1">
+            {result.summary!.highlights.map((h, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm text-gray-700">
+                <span className="flex-shrink-0 mt-0.5 h-4 w-4 rounded-full bg-green-100 flex items-center justify-center">
+                  <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+                </span>
+                {h}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Recommendations */}
+      {hasRecommendations && (
+        <div className="px-4 pb-3 flex-shrink-0">
+          <div className="rounded-xl bg-indigo-50 border border-indigo-100 p-3">
+            <p className="text-xs text-indigo-600 font-medium uppercase tracking-wide mb-1.5">Recommendations</p>
+            <ul className="space-y-1">
+              {result.summary!.recommendations.map((r, i) => (
+                <li key={i} className="flex items-start gap-2 text-sm text-indigo-800">
+                  <span className="flex-shrink-0 text-indigo-400 mt-0.5">→</span>
+                  {r}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* Chart */}
+      {result.data && vh && vh.chart_type !== 'table' && vh.chart_type !== 'heatmap' && (
+        <ChartPanel
+          data={result.data}
+          chartType={vh.chart_type}
+          xAxis={vh.x_axis}
+          yAxis={vh.y_axis}
+        />
+      )}
+
       {/* Data table */}
       {result.data && result.data.columns.length > 0 && (
         <div className="px-4 pb-3 flex-shrink-0">
-          {/* Visualization hint badge */}
-          {result.visualization_hint && result.visualization_hint.chart_type !== 'table' && (
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-xs text-gray-400">Suggested visualization:</span>
-              <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                {result.visualization_hint.chart_type} chart
-                {result.visualization_hint.x_axis && ` (${result.visualization_hint.x_axis} × ${result.visualization_hint.y_axis})`}
-              </span>
-            </div>
-          )}
           <DataTable
             columns={result.data.columns}
             rows={result.data.rows}

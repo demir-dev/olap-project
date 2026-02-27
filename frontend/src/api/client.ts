@@ -1,6 +1,6 @@
-import type { ChatRequest, ChatResponse, HealthResponse, SchemaResponse } from '../types'
+import type { ChatRequest, ChatResponse, DashboardKPIs, HealthResponse, SchemaResponse } from '../types'
 
-// Base URL — in dev mode, Vite proxy forwards /chat → http://localhost:8000/chat
+// Base URL — in dev mode, Vite proxy forwards /chat, /api → http://localhost:8000
 // In production Docker, set VITE_API_BASE_URL at build time
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string) || ''
 
@@ -40,4 +40,16 @@ export const api = {
 
   health: (): Promise<HealthResponse> =>
     apiFetch<HealthResponse>('/health'),
+
+  dashboardKpis: (): Promise<DashboardKPIs> =>
+    apiFetch<DashboardKPIs>('/api/query/dashboard'),
+
+  suggestions: (): Promise<{ suggestions: string[] }> =>
+    apiFetch<{ suggestions: string[] }>('/api/query/suggestions'),
+
+  olapOperation: (operation: string, body: Record<string, unknown> = {}): Promise<unknown> =>
+    apiFetch<unknown>(`/api/olap/${operation}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 }

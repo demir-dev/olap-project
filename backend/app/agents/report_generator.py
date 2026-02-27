@@ -144,6 +144,89 @@ Write a 2-4 sentence business insight summary."""
 
         return templates.get(intent, f"Query returned {row_count} result(s). " + _top_value_sentence(columns, rows))
 
+    def generate_structured_summary(
+        self,
+        user_question: str,
+        intent: str,
+        data: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Generate a structured executive summary with highlights and recommendations.
+        Returns: {"text": str, "highlights": list[str], "recommendations": list[str]}
+        LLM path: sends JSON-only system prompt. Falls back to template + empty lists.
+        """
+        default_result: dict[str, Any] = {"text": "", "highlights": [], "recommendations": []}
+
+        if data is None or data.get("row_count", 0) == 0:
+            default_result["text"] = "No data was found for your query."
+            return default_result
+
+        client = _get_client()
+        if client:
+            return self._llm_structured_summary(client, user_question, intent, data)
+        else:
+            default_result["text"] = self._template_narrative(intent, data)
+            return default_result
+
+    def _llm_structured_summary(
+        self,
+        client: anthropic.Anthropic,
+        user_question: str,
+        intent: str,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        columns = data.get("columns", [])
+        rows = data.get("rows", [])
+        row_count = data.get("row_count", 0)
+        sample_rows = rows[:10]
+        table_str = _format_table_for_prompt(columns, sample_rows)
+
+        system_prompt = """You are a concise business intelligence analyst.
+Return ONLY a JSON object with exactly these keys:
+{
+  "text": "2-4 sentence plain English summary of the key insight",
+  "highlights": ["bullet 1", "bullet 2", "bullet 3"],
+  "recommendations": ["recommendation 1", "recommendation 2"]
+}
+Rules for text: Focus on biggest number, fastest growth, main trend. Use $, %, round to 1 decimal.
+Rules for highlights: 2-4 short bullet points with specific numbers from the data.
+Rules for recommendations: 1-3 actionable business recommendations based on the data.
+Return ONLY the JSON object, no markdown, no extra text."""
+
+        user_prompt = f"""User asked: "{user_question}"
+OLAP operation: {intent}
+Result ({row_count} rows, showing up to 10):
+
+{table_str}
+
+Return the JSON summary."""
+
+        try:
+            response = client.messages.create(
+                model=settings.llm_model,
+                max_tokens=512,
+                temperature=settings.llm_temperature,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            raw = response.content[0].text.strip()
+            # Robustly extract JSON
+            import json as _json
+            import re as _re
+            json_match = _re.search(r"\{.*\}", raw, _re.DOTALL)
+            if json_match:
+                parsed = _json.loads(json_match.group())
+                return {
+                    "text": str(parsed.get("text", "")),
+                    "highlights": list(parsed.get("highlights", [])),
+                    "recommendations": list(parsed.get("recommendations", [])),
+                }
+        except Exception as exc:
+            logger.warning("LLM structured summary failed: %s", exc)
+
+        return {"text": self._template_narrative(intent, data), "highlights": [], "recommendations": []}
+
     def generate_follow_ups(
         self,
         user_question: str,

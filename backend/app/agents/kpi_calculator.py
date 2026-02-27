@@ -8,6 +8,8 @@ profit margins, Top-N rankings, and market share.
 import logging
 from typing import Any
 
+import pandas as pd
+
 from app.agents.base_agent import AgentInput, AgentOutput, BaseAgent
 from app.dependencies import execute_query
 
@@ -84,7 +86,9 @@ class KPICalculatorAgent(BaseAgent):
         kpi_type = entities.get("kpi_type", "")
         intent = agent_input.intent
 
-        if intent == "compare" or kpi_type in ("yoy_growth", "yoy", "compare"):
+        if kpi_type in ("compare_periods", "compare_period"):
+            return self._compare_periods(entities, ctx)
+        elif intent == "compare" or kpi_type in ("yoy_growth", "yoy", "compare"):
             return self._yoy_growth(entities, ctx)
         elif kpi_type in ("mom_growth", "mom"):
             return self._mom_change(entities, ctx)
@@ -102,6 +106,80 @@ class KPICalculatorAgent(BaseAgent):
                 return self._top_n(entities, ctx)
             else:
                 return self._yoy_growth(entities, ctx)
+
+    # ------------------------------------------------------------------
+    # Compare Periods (pandas merge-based delta analysis)
+    # ------------------------------------------------------------------
+
+    def _compare_periods(self, entities: dict, ctx: dict) -> AgentOutput:
+        """Compare two specific years using pandas merge for delta computation."""
+        years = entities.get("years", [])
+        if len(years) < 2:
+            # Fall back to YoY if not enough years specified
+            return self._yoy_growth(entities, ctx)
+
+        year_a, year_b = int(years[0]), int(years[1])
+        measure = (entities.get("measures") or ["revenue"])[0]
+        meas_expr = MEASURE_SQL.get(measure, MEASURE_SQL["revenue"])
+
+        # Determine dimension
+        dim_key = "category"
+        for candidate in ["region", "category", "customer_segment", "country", "subcategory"]:
+            if candidate in entities.get("dimensions", []):
+                dim_key = candidate
+                break
+        dim_expr = DIM_SQL.get(dim_key, "p.category")
+
+        sql_a = f"""
+SELECT {dim_expr} AS dimension, {meas_expr} AS value_{year_a}
+{BASE_JOINS}
+WHERE d.year = {year_a}
+GROUP BY {dim_expr}
+ORDER BY value_{year_a} DESC
+""".strip()
+
+        sql_b = f"""
+SELECT {dim_expr} AS dimension, {meas_expr} AS value_{year_b}
+{BASE_JOINS}
+WHERE d.year = {year_b}
+GROUP BY {dim_expr}
+ORDER BY value_{year_b} DESC
+""".strip()
+
+        try:
+            cols_a, rows_a = execute_query(sql_a)
+            cols_b, rows_b = execute_query(sql_b)
+        except Exception as exc:
+            return AgentOutput(agent_name=self.name, error=str(exc), sql_query=sql_a)
+
+        df_a = pd.DataFrame(rows_a, columns=cols_a)
+        df_b = pd.DataFrame(rows_b, columns=cols_b)
+
+        df = pd.merge(df_a, df_b, on="dimension", how="outer").fillna(0)
+        col_a = f"value_{year_a}"
+        col_b = f"value_{year_b}"
+        df["delta"] = (df[col_b] - df[col_a]).round(2)
+        df["delta_pct"] = df.apply(
+            lambda r: round((r[col_b] - r[col_a]) / r[col_a] * 100, 2) if r[col_a] != 0 else 0.0,
+            axis=1,
+        )
+        df = df.sort_values("delta_pct", ascending=False)
+
+        columns = list(df.columns)
+        rows = [list(row) for row in df.itertuples(index=False, name=None)]
+        combined_sql = f"-- Year A:\n{sql_a}\n-- Year B:\n{sql_b}"
+
+        return AgentOutput(
+            agent_name=self.name,
+            sql_query=combined_sql,
+            data=self._make_data_payload(columns, rows),
+            visualization_hint={"chart_type": "bar", "x_axis": "dimension", "y_axis": "delta_pct"},
+            follow_up_suggestions=[
+                f"Which {dim_key} grew fastest in {year_b}?",
+                "Show the absolute delta instead of percentage",
+                f"Drill into the top performer in {year_b}",
+            ],
+        )
 
     # ------------------------------------------------------------------
     # Year-over-Year Growth
