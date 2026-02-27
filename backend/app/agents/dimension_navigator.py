@@ -90,16 +90,20 @@ class DimensionNavigatorAgent(BaseAgent):
         intent = agent_input.intent
         entities = agent_input.entities
         ctx = agent_input.session_context
+        message = agent_input.message
+
+        # Add message to entities for context
+        entities_with_msg = {**entities, "message": message}
 
         if intent == "dimensions":
-            return self._list_members(entities, ctx)
+            return self._list_members(entities_with_msg, ctx)
         elif intent == "drill_down":
-            return self._drill_down(entities, ctx)
+            return self._drill_down(entities_with_msg, ctx)
         elif intent == "roll_up":
-            return self._roll_up(entities, ctx)
+            return self._roll_up(entities_with_msg, ctx)
         else:
             # Fallback: list members
-            return self._list_members(entities, ctx)
+            return self._list_members(entities_with_msg, ctx)
 
     # ------------------------------------------------------------------
     # List dimension members
@@ -138,16 +142,42 @@ class DimensionNavigatorAgent(BaseAgent):
         # Determine starting level
         from_level = entities.get("from_level") or ctx.get("last_dimension")
 
+        # Get message from context if available
+        message = ctx.get("message", "") if isinstance(ctx, dict) else ""
+        if not message and isinstance(entities, dict):
+            message = entities.get("message", "")
+
         # Detect from context what hierarchy we're in
         if not from_level:
-            if entities.get("years") or "year" in ctx.get("active_filters", {}):
+            # Check for explicit hierarchy mentions
+            msg_lower = str(message).lower() if message else ""
+            if "quarter" in msg_lower or "q1" in msg_lower or "q2" in msg_lower or "q3" in msg_lower or "q4" in msg_lower:
+                from_level = "quarter"
+            elif "month" in msg_lower:
+                from_level = "month"
+            elif entities.get("years") or "year" in ctx.get("active_filters", {}):
                 from_level = "year"
+            elif entities.get("quarters"):
+                from_level = "quarter"
+            elif entities.get("months"):
+                from_level = "month"
             elif entities.get("regions"):
                 from_level = "region"
             elif entities.get("categories"):
                 from_level = "category"
+            elif entities.get("subcategories"):
+                from_level = "subcategory"
+            elif "country" in msg_lower:
+                from_level = "country"
+            elif "subcategory" in msg_lower:
+                from_level = "subcategory"
             else:
-                from_level = "year"  # default
+                # Check last turn's dimension
+                last_dim = ctx.get("last_dimension")
+                if last_dim and last_dim in LEVEL_SQL:
+                    from_level = last_dim
+                else:
+                    from_level = "year"  # default
 
         hierarchy = _which_hierarchy(from_level) or TIME_HIERARCHY
         to_level = entities.get("to_level") or _next_level(hierarchy, from_level)
@@ -156,20 +186,42 @@ class DimensionNavigatorAgent(BaseAgent):
             # Already at finest level
             return AgentOutput(
                 agent_name=self.name,
-                narrative=f"Already at the finest level of the {from_level} hierarchy.",
-                follow_up_suggestions=["Roll up to see the summary", "Compare periods"],
+                narrative=f"Already at the finest level of the {from_level} hierarchy. Cannot drill down further.",
+                follow_up_suggestions=["Roll up to see the summary", "Compare periods", "Show top performers"],
             )
 
-        # Build filters
-        filters = dict(ctx.get("active_filters", {}))
+        # Build filters from context and entities - prioritize entities over context
+        filters = {}
+        
+        # First, copy active filters from context (sticky filters)
+        active_filters = ctx.get("active_filters", {})
+        if active_filters:
+            filters.update(active_filters)
+        
+        # Then override with explicit entities from current query
         if entities.get("regions"):
-            filters["region"] = entities["regions"][0]
+            region_val = entities["regions"][0] if isinstance(entities["regions"], list) else entities["regions"]
+            filters["region"] = region_val
         if entities.get("categories"):
-            filters["category"] = entities["categories"][0]
+            cat_val = entities["categories"][0] if isinstance(entities["categories"], list) else entities["categories"]
+            filters["category"] = cat_val
         if entities.get("years"):
-            filters["year"] = entities["years"][0]
+            year_val = entities["years"][0] if isinstance(entities["years"], list) else entities["years"]
+            filters["year"] = year_val
         if entities.get("quarters"):
-            filters["quarter"] = f"Q{entities['quarters'][0]}"
+            quarter_val = entities["quarters"][0] if isinstance(entities["quarters"], list) else entities["quarters"]
+            # Ensure quarter format matches schema (Q1, Q2, Q3, Q4)
+            if isinstance(quarter_val, int):
+                filters["quarter"] = f"Q{quarter_val}"
+            else:
+                quarter_str = str(quarter_val)
+                filters["quarter"] = quarter_str if quarter_str.startswith("Q") else f"Q{quarter_str}"
+        if entities.get("months"):
+            month_val = entities["months"][0] if isinstance(entities["months"], list) else entities["months"]
+            filters["month"] = month_val
+        if entities.get("customer_segments"):
+            seg_val = entities["customer_segments"][0] if isinstance(entities["customer_segments"], list) else entities["customer_segments"]
+            filters["customer_segment"] = seg_val
 
         return self._aggregate_at_level(to_level, filters, from_level)
 
@@ -178,18 +230,76 @@ class DimensionNavigatorAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _roll_up(self, entities: dict, ctx: dict) -> AgentOutput:
-        from_level = entities.get("from_level") or ctx.get("last_dimension", "month")
+        # Determine starting level
+        from_level = entities.get("from_level") or ctx.get("last_dimension")
+        
+        # Get message from context if available
+        message = ctx.get("message", "") if isinstance(ctx, dict) else ""
+        if not message and isinstance(entities, dict):
+            message = entities.get("message", "")
+        
+        # If no from_level, try to infer from context
+        if not from_level:
+            msg_lower = str(message).lower() if message else ""
+            if "month" in msg_lower or entities.get("months"):
+                from_level = "month"
+            elif "quarter" in msg_lower or entities.get("quarters"):
+                from_level = "quarter"
+            elif "country" in msg_lower:
+                from_level = "country"
+            elif "subcategory" in msg_lower or entities.get("subcategories"):
+                from_level = "subcategory"
+            else:
+                # Check last turn's dimension
+                last_dim = ctx.get("last_dimension")
+                if last_dim and last_dim in LEVEL_SQL:
+                    from_level = last_dim
+                else:
+                    from_level = "month"  # default to finest level
+        
         hierarchy = _which_hierarchy(from_level) or TIME_HIERARCHY
         to_level = entities.get("to_level") or _prev_level(hierarchy, from_level)
 
         if to_level is None:
             return AgentOutput(
                 agent_name=self.name,
-                narrative=f"Already at the highest level of the {from_level} hierarchy.",
-                follow_up_suggestions=["Drill down for more detail"],
+                narrative=f"Already at the highest level of the {from_level} hierarchy. Cannot roll up further.",
+                follow_up_suggestions=["Drill down for more detail", "Compare with other dimensions", "Show detailed breakdown"],
             )
 
-        filters = dict(ctx.get("active_filters", {}))
+        # Build filters from context and entities - prioritize entities over context
+        filters = {}
+        
+        # First, copy active filters from context (sticky filters)
+        active_filters = ctx.get("active_filters", {})
+        if active_filters:
+            filters.update(active_filters)
+        
+        # Then override with explicit entities from current query
+        if entities.get("regions"):
+            region_val = entities["regions"][0] if isinstance(entities["regions"], list) else entities["regions"]
+            filters["region"] = region_val
+        if entities.get("categories"):
+            cat_val = entities["categories"][0] if isinstance(entities["categories"], list) else entities["categories"]
+            filters["category"] = cat_val
+        if entities.get("years"):
+            year_val = entities["years"][0] if isinstance(entities["years"], list) else entities["years"]
+            filters["year"] = year_val
+        if entities.get("quarters"):
+            quarter_val = entities["quarters"][0] if isinstance(entities["quarters"], list) else entities["quarters"]
+            # Ensure quarter format matches schema (Q1, Q2, Q3, Q4)
+            if isinstance(quarter_val, int):
+                filters["quarter"] = f"Q{quarter_val}"
+            else:
+                quarter_str = str(quarter_val)
+                filters["quarter"] = quarter_str if quarter_str.startswith("Q") else f"Q{quarter_str}"
+        if entities.get("months"):
+            month_val = entities["months"][0] if isinstance(entities["months"], list) else entities["months"]
+            filters["month"] = month_val
+        if entities.get("customer_segments"):
+            seg_val = entities["customer_segments"][0] if isinstance(entities["customer_segments"], list) else entities["customer_segments"]
+            filters["customer_segment"] = seg_val
+        
         return self._aggregate_at_level(to_level, filters, from_level)
 
     # ------------------------------------------------------------------
@@ -203,30 +313,37 @@ class DimensionNavigatorAgent(BaseAgent):
 
         _, col, full_col = level_info
 
-        # Build WHERE
+        # Build WHERE clause with parameters
         where_clauses = []
         params = []
         for k, v in filters.items():
             col_expr = FILTER_SQL.get(k)
-            if col_expr:
-                if isinstance(v, list):
+            if col_expr and v is not None:
+                if isinstance(v, list) and len(v) > 0:
                     placeholders = ", ".join("?" * len(v))
                     where_clauses.append(f"{col_expr} IN ({placeholders})")
                     params.extend(v)
-                else:
+                elif not isinstance(v, list):
                     where_clauses.append(f"{col_expr} = ?")
                     params.append(v)
+        
+        # Log filters for debugging
+        if filters:
+            logger.debug("DimensionNavigator filters: %s", filters)
+            logger.debug("DimensionNavigator params: %s", params)
 
         where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
         # Order by natural dimension order
-        order_col = full_col
-        if level in ["year", "month"]:
-            order_col = LEVEL_SQL[level][2].replace("_name", "").replace("quarter_", "quarter")
-            if level == "month":
-                order_col = "d.month"
-            elif level == "year":
-                order_col = "d.year"
+        # For month: ORDER BY d.month (integer) for chronological sort, but d.month is not in
+        # GROUP BY, so we use MIN(d.month) — all rows in the same month_name group share the
+        # same month integer, so MIN() gives correct ordering without a GROUP BY clause change.
+        if level == "month":
+            order_expr = "MIN(d.month)"
+        elif level == "year":
+            order_expr = "d.year"       # d.year IS in GROUP BY via full_col = "d.year"
+        else:
+            order_expr = full_col
 
         sql = f"""
 SELECT
@@ -238,12 +355,16 @@ SELECT
 {BASE_JOINS}
 {where}
 GROUP BY {full_col}
-ORDER BY {order_col if level in ['year','month'] else full_col}
+ORDER BY {order_expr}
 """.strip()
 
+        # For debugging: log the query and params
+        logger.debug("DimensionNavigator query: %s with params: %s", sql, params)
+
         try:
-            columns, rows = execute_query(sql, params)
+            columns, rows = execute_query(sql, params if params else None)
         except Exception as exc:
+            logger.error("Query execution failed: %s\nSQL: %s\nParams: %s", exc, sql, params)
             return AgentOutput(agent_name=self.name, error=str(exc), sql_query=sql)
 
         # Viz suggestion
@@ -258,10 +379,16 @@ ORDER BY {order_col if level in ['year','month'] else full_col}
         follow_ups.append("Compare with the previous period")
         follow_ups.append("Show profit margin trend")
 
+        # Store the current level in context for next operation
+        narrative = f"Showing {level} level aggregation with {len(rows)} group(s)."
+        if context_level:
+            narrative += f" Rolled up from {context_level}." if level != context_level else f" Drilled down from {context_level}."
+
         return AgentOutput(
             agent_name=self.name,
             sql_query=sql,
             data=self._make_data_payload(columns, rows),
             visualization_hint={"chart_type": chart, "x_axis": level, "y_axis": "revenue"},
             follow_up_suggestions=follow_ups[:3],
+            narrative=narrative,
         )

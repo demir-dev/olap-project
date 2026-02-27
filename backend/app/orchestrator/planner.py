@@ -42,6 +42,7 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
     "drill_down": [
         "break down", "drill down", "drill into", "deeper", "granular",
         "by month", "by week", "by day", "more detail", "detailed",
+        "down to", "drill ",   # "Drill Q4 2024 down to months", "Drill into X"
     ],
     "roll_up": [
         "roll up", "summarize", "summarise", "aggregate", "overall",
@@ -51,11 +52,17 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
         " vs ", " versus ", "compared to", "year over year", "yoy",
         "month over month", "mom", "growth", "change from", "difference",
         "better than", "worse than",
+        "monthly trend", "monthly revenue", "month by month",  # monthly analysis
+        "each month", "trend for 20",                          # "trend for 2024"
     ],
     "kpi": [
-        "top ", "bottom ", "best ", "worst ", "highest ", "lowest ",
+        "top ", "bottom ", "best ", "worst", "highest ", "lowest ",  # "worst" no space req
         "margin", "profit margin", "growth rate", "market share",
         "ranking", "ranked", "leading", "lagging",
+        "percentage", "share of", "% of",                            # market share triggers
+        "most valuable", "most profitable", "least profitable",
+        "best performing", "worst performing", "worst-performing",
+        "worst-", "most important", "least ", "smallest ",
     ],
     "pivot": [
         "pivot", "cross tab", "as columns", "rotate", "transpose",
@@ -398,6 +405,12 @@ class Planner:
                 if best_intent == "anomaly":
                     entities["kpi_type"] = "anomaly"
                     best_intent = "anomaly"
+                # "compare" with 2 specific years → side-by-side period comparison
+                if best_intent == "compare" and len(entities.get("years", [])) >= 2:
+                    entities["kpi_type"] = "compare_periods"
+                # monthly keywords → route as "compare" so KPICalculator handles mom_change
+                if entities.get("kpi_type") == "mom_growth":
+                    best_intent = "kpi"
                 return best_intent, entities
 
         # Stage 2: LLM classification (when keyword matching gives no clear signal)
@@ -472,34 +485,88 @@ class Planner:
 
         # Measures
         meas_map = {
-            "revenue":       "revenue",
-            "profit":        "profit",
-            "cost":          "cost",
-            "quantity":      "quantity",
-            "orders":        "orders",
-            "margin":        "profit_margin",
-            "profit margin": "profit_margin",
+            "revenue":             "revenue",
+            "profit":              "profit",
+            "cost":                "cost",
+            "quantity":            "quantity",
+            "orders":              "orders",
+            "transactions":        "orders",    # natural language alias
+            "transaction":         "orders",
+            "sales count":         "orders",
+            "margin":              "profit_margin",
+            "profit margin":       "profit_margin",
+            "average order value": "avg_order",  # ex. 3: avg order value
+            "average order":       "avg_order",
+            "avg order":           "avg_order",
+            "sales":               "revenue",    # "total sales" → revenue
         }
         found_meas = list({v for k, v in meas_map.items() if k in msg})
         if found_meas:
             entities["measures"] = found_meas
 
-        # Dimensions (group-by)
+        # Dimensions (group-by) — "by X", "per X", "each X", "for each X"
         dim_keywords = {
             "by region":           "region",
+            "per region":          "region",
+            "each region":         "region",
+            "for each region":     "region",
             "by country":          "country",
+            "per country":         "country",
+            "each country":        "country",
             "by category":         "category",
+            "per category":        "category",
+            "each category":       "category",
+            "for each category":   "category",
             "by subcategory":      "subcategory",
+            "per subcategory":     "subcategory",
+            "each subcategory":    "subcategory",
             "by product":          "product_name",
+            "per product":         "product_name",
             "by segment":          "customer_segment",
+            "per segment":         "customer_segment",
+            "each segment":        "customer_segment",
             "by customer":         "customer_segment",
             "by quarter":          "quarter",
+            "per quarter":         "quarter",
             "by month":            "month_name",
+            "per month":           "month_name",
             "by year":             "year",
+            "per year":            "year",
+            "annually":            "year",
         }
         found_dims = list({v for k, v in dim_keywords.items() if k in msg})
         if found_dims:
             entities["dimensions"] = found_dims
+
+        # Monthly / quarterly time dimension detection (overrides dim_keywords for time)
+        if any(kw in msg for kw in [
+            "monthly", "by month", "per month", "each month",
+            "month by month", "month-by-month", "monthly trend", "monthly revenue",
+        ]):
+            entities["dimensions"] = ["month_name"]
+            entities["kpi_type"] = "mom_growth"
+
+        if any(kw in msg for kw in [
+            "quarterly", "by quarter", "per quarter", "each quarter", "quarterly trend",
+        ]):
+            entities.setdefault("dimensions", ["quarter"])
+
+        # Detect dimension from bare noun/plural (e.g. "top 5 countries", "worst-performing subcategory")
+        # Only applied when dim_keywords above didn't already find a dimension
+        if not entities.get("dimensions"):
+            bare_dim_map = [
+                ("countries",          "country"),
+                ("subcategories",      "subcategory"),
+                ("subcategory",        "subcategory"),
+                ("categories",         "category"),
+                ("products",           "product_name"),
+                ("segments",           "customer_segment"),
+                ("customer segments",  "customer_segment"),
+            ]
+            for kw, dim_val in bare_dim_map:
+                if re.search(r"\b" + kw + r"\b", msg):
+                    entities["dimensions"] = [dim_val]
+                    break
 
         # Top-N
         top_n_match = re.search(r"top\s+(\d+)", msg)
@@ -507,15 +574,40 @@ class Planner:
             entities["top_n"] = int(top_n_match.group(1))
             entities.setdefault("dimensions", ["region"])
 
-        # KPI type
-        if "yoy" in msg or "year over year" in msg:
-            entities["kpi_type"] = "yoy_growth"
-        elif "mom" in msg or "month over month" in msg:
-            entities["kpi_type"] = "mom_growth"
-        elif "margin" in msg:
-            entities["kpi_type"] = "margin"
-        elif "market share" in msg:
-            entities["kpi_type"] = "market_share"
+        # Bottom-N (worst / least / bottom performers)
+        bottom_n_match = re.search(r"bottom\s+(\d+)", msg)
+        if bottom_n_match:
+            entities["top_n"] = int(bottom_n_match.group(1))
+            entities["ascending"] = True
+            entities.setdefault("dimensions", ["subcategory"])
+
+        # "worst" with no number → bottom 5 default
+        if any(kw in msg for kw in ["worst", "worst-performing", "least profitable",
+                                     "worst performing", "lowest margin"]):
+            if "top_n" not in entities:
+                entities["top_n"] = 5
+            entities["ascending"] = True
+
+        # KPI type (only set if not already set by monthly detection above)
+        if "kpi_type" not in entities:
+            if "yoy" in msg or "year over year" in msg:
+                entities["kpi_type"] = "yoy_growth"
+            elif "mom" in msg or "month over month" in msg:
+                entities["kpi_type"] = "mom_growth"
+            elif "margin" in msg:
+                entities["kpi_type"] = "margin"
+            elif any(kw in msg for kw in [
+                "market share", "percentage of revenue", "share of revenue",
+                "% of revenue", "percentage of", "what percentage", "what percent",
+                "revenue share", "share by",
+            ]):
+                entities["kpi_type"] = "market_share"
+            elif any(kw in msg for kw in [
+                "most valuable", "most profitable", "most important",
+                "most significant", "which segment", "which customer segment",
+            ]):
+                entities["kpi_type"] = "top_n"
+                entities.setdefault("dimensions", ["customer_segment"])
 
         return entities
 
@@ -583,7 +675,15 @@ Choose the tool that best matches the user's intent and extract relevant paramet
             entities.setdefault("dimensions", [tool_input["rows"]])
         if tool_input.get("value"):
             d = tool_input.get("dimension", "region")
-            entities.setdefault("filters", {})[d] = tool_input["value"]
+            val = tool_input["value"]
+            # Cast time dimension values to int to match DuckDB SMALLINT/TINYINT schema
+            # (LLM sometimes returns year/month as strings which cause 0-row results)
+            if d in ("year", "month", "quarter_num"):
+                try:
+                    val = int(val)
+                except (ValueError, TypeError):
+                    pass
+            entities.setdefault("filters", {})[d] = val
 
         # Map tool name → (intent, kpi_type)
         mapping: dict[str, tuple[str, str | None]] = {

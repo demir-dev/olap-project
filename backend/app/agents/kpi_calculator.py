@@ -88,10 +88,15 @@ class KPICalculatorAgent(BaseAgent):
 
         if kpi_type in ("compare_periods", "compare_period"):
             return self._compare_periods(entities, ctx)
-        elif intent == "compare" or kpi_type in ("yoy_growth", "yoy", "compare"):
-            return self._yoy_growth(entities, ctx)
         elif kpi_type in ("mom_growth", "mom"):
             return self._mom_change(entities, ctx)
+        elif intent == "compare":
+            # Two specific years → side-by-side delta table; otherwise YoY trend
+            if len(entities.get("years", [])) >= 2:
+                return self._compare_periods(entities, ctx)
+            return self._yoy_growth(entities, ctx)
+        elif kpi_type in ("yoy_growth", "yoy"):
+            return self._yoy_growth(entities, ctx)
         elif kpi_type in ("top_n", "top", "ranking") or entities.get("top_n"):
             return self._top_n(entities, ctx)
         elif kpi_type == "margin" or "margin" in agent_input.message.lower():
@@ -349,8 +354,15 @@ ORDER BY year, month
 
     def _top_n(self, entities: dict, ctx: dict) -> AgentOutput:
         n = entities.get("top_n", 5)
+        ascending = entities.get("ascending", False)   # True = bottom-N / worst performers
         measure = (entities.get("measures") or ["revenue"])[0]
+        # For "worst margin" → rank by margin ascending
+        if ascending and "margin" in str(entities.get("kpi_type", "")) or \
+           ascending and "margin" in str(entities.get("measures", [])):
+            measure = "profit_margin"
         meas_expr = MEASURE_SQL.get(measure, MEASURE_SQL["revenue"])
+        order_dir = "ASC" if ascending else "DESC"
+        rank_dir = "ASC" if ascending else "DESC"
 
         # Dimension to rank by
         dim_key = "region"
@@ -379,11 +391,11 @@ SELECT
     {meas_expr} AS {measure},
     ROUND({MEASURE_SQL['profit_margin']}, 2) AS profit_margin_pct,
     {MEASURE_SQL['orders']} AS transactions,
-    RANK() OVER (ORDER BY {meas_expr} DESC) AS rank
+    RANK() OVER (ORDER BY {meas_expr} {rank_dir}) AS rank
 {BASE_JOINS}
 {where}
 GROUP BY {dim_expr}
-ORDER BY {measure} DESC
+ORDER BY {measure} {order_dir}
 LIMIT {n_val}
 """.strip()
 
@@ -392,15 +404,16 @@ LIMIT {n_val}
         except Exception as exc:
             return AgentOutput(agent_name=self.name, error=str(exc), sql_query=sql)
 
+        label = "bottom" if ascending else "top"
         return AgentOutput(
             agent_name=self.name,
             sql_query=sql,
             data=self._make_data_payload(columns, rows),
             visualization_hint={"chart_type": "bar", "x_axis": dim_key, "y_axis": measure},
             follow_up_suggestions=[
-                f"Drill into the top {dim_key}",
-                f"Show bottom {n_val} instead",
-                f"Compare top {dim_key} year over year",
+                f"Drill into the {label} {dim_key}",
+                f"Show {'top' if ascending else 'bottom'} {n_val} instead",
+                f"Compare {label} {dim_key} year over year",
             ],
         )
 

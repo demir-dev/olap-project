@@ -137,6 +137,9 @@ class CubeOperationsAgent(BaseAgent):
         if entities.get("quarters"):
             q_vals = entities["quarters"]
             filters["quarter"] = [f"Q{q}" for q in q_vals] if len(q_vals) > 1 else f"Q{q_vals[0]}"
+        if entities.get("months"):
+            m_vals = entities["months"]
+            filters["month"] = m_vals if len(m_vals) > 1 else m_vals[0]
         if entities.get("customer_segments"):
             filters["customer_segment"] = entities["customer_segments"][0]
 
