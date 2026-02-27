@@ -61,27 +61,41 @@ class SessionContext:
             "categories":        "category",
             "years":             "year",
             "quarters":          "quarter",
+            "months":            "month",
             "customer_segments": "customer_segment",
             "measures":          "measure",
         }
         for entity_key, ctx_key in overrideable.items():
             val = entities.get(entity_key)
             if val:  # Only update if new value present
-                self.resolved_context[ctx_key] = val[0] if isinstance(val, list) and len(val) == 1 else val
+                # Take first value if it's a list, otherwise use the value directly
+                if isinstance(val, list) and len(val) > 0:
+                    self.resolved_context[ctx_key] = val[0]
+                elif not isinstance(val, list):
+                    self.resolved_context[ctx_key] = val
 
-        # Build active_filters from resolved_context
+        # Track last dimension for drill-down/roll-up context
+        dimensions = entities.get("dimensions")
+        if dimensions:
+            if isinstance(dimensions, list) and len(dimensions) > 0:
+                self.resolved_context["last_dimension"] = dimensions[0]
+            elif isinstance(dimensions, str):
+                self.resolved_context["last_dimension"] = dimensions
+
+        # Build active_filters from resolved_context - ensure all filters are included
         filter_map = {
             "region":           "region",
             "category":         "category",
             "year":             "year",
             "quarter":          "quarter",
+            "month":            "month",
             "customer_segment": "customer_segment",
         }
-        self.resolved_context["active_filters"] = {
-            filter_map[k]: v
-            for k, v in self.resolved_context.items()
-            if k in filter_map
-        }
+        active_filters = {}
+        for ctx_key, filter_key in filter_map.items():
+            if ctx_key in self.resolved_context:
+                active_filters[filter_key] = self.resolved_context[ctx_key]
+        self.resolved_context["active_filters"] = active_filters
 
     def is_expired(self) -> bool:
         ttl = timedelta(minutes=settings.session_ttl_minutes)
